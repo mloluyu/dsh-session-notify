@@ -3,15 +3,19 @@
  * the host entry point is a deliberate no-op so the bundle registers and
  * the GUI loads this module.
  *
- * Loaded by the DSH web GUI through window.__ModuleLoader__. When a
- * top-level session settles from running to idle:
- * - page focused && user is NOT viewing that session -> in-app popup card
- *   in the top-right corner;
- * - page focused && user IS viewing that session -> nothing (they are
- *   watching it live);
- * - page unfocused -> a page-raised system notification (browser
- *   Notification API; the desktop app delivers it under its own identity:
- *   whale icon, one Settings entry).
+ * Loaded by the DSH web GUI through window.__ModuleLoader__. Notified
+ * moments:
+ * - a top-level session settles from running to idle:
+ *     page focused && user is NOT viewing that session -> in-app popup
+ *     card in the top-right corner;
+ *     page focused && user IS viewing that session -> nothing (they are
+ *     watching it live);
+ *     page unfocused -> a page-raised system notification (browser
+ *     Notification API; the desktop app delivers it under its own
+ *     identity: whale icon, one Settings entry).
+ * - a tool approval request or a user question arrives mid-run
+ *   (`approval/request` / `user-questions/request` remote pushes): same
+ *   routing, but immediately.
  * When no page is open nothing is sent — by design.
  */
 window.__ModuleLoader__.load({
@@ -29,21 +33,27 @@ window.__ModuleLoader__.load({
 
     const TEXTS = {
       zh: {
-        completed: '✅ 任务完成',
-        error: '❌ 运行出错',
-        aborted: '⏹️ 已取消',
-        blocked: '⏸️ 等待你的输入',
-        maxTokens: '⚠️ 达到输出上限',
-        other: 'ℹ️ 任务已结束',
+        completed: '任务完成',
+        error: '运行出错',
+        aborted: '已取消',
+        blocked: '等待你的输入',
+        maxTokens: '达到输出上限',
+        other: '任务已结束',
+        approval: '等待你的授权',
+        question: '等待你的回答',
+        questionMany: (count) => `等待你的回答（${count} 个问题）`,
         dismiss: '关闭'
       },
       en: {
-        completed: '✅ Task complete',
-        error: '❌ Task failed',
-        aborted: '⏹️ Cancelled',
-        blocked: '⏸️ Waiting for your input',
-        maxTokens: '⚠️ Output limit reached',
-        other: 'ℹ️ Task finished',
+        completed: 'Task complete',
+        error: 'Task failed',
+        aborted: 'Cancelled',
+        blocked: 'Waiting for your input',
+        maxTokens: 'Output limit reached',
+        other: 'Task finished',
+        approval: 'Approval needed',
+        question: 'Answer needed',
+        questionMany: (count) => `Answer needed (${count} questions)`,
         dismiss: 'Dismiss'
       }
     }
@@ -260,20 +270,20 @@ window.__ModuleLoader__.load({
           return texts.other
         }
 
-        const showCardFor = (id, state) => {
+        const showCardFor = (id, state, body) => {
           if (disposed) return
           let focused = true
           try {
             focused = document.hasFocus()
           } catch {}
           if (!focused) {
-            postWebNotification(id, state)
+            postWebNotification(id, state, body)
             return
           }
           // The user is watching this session live: no popup needed.
           if (viewedSessionId === id) return
           if (!cfg.cardEnabled) return
-          showCard(state.title || cfg.title, bodyTextOf(state))
+          showCard(state.title || cfg.title, body)
         }
 
         /**
@@ -281,18 +291,18 @@ window.__ModuleLoader__.load({
          * own identity (whale icon). Falls back to the in-app card whenever
          * the API is missing or permission cannot be granted.
          */
-        const postWebNotification = (id, state) => {
+        const postWebNotification = (id, state, body) => {
           const heading = state.title || cfg.title
-          const body = bodyTextOf(state)
+          const text = body || bodyTextOf(state)
           if (typeof Notification === 'undefined') {
-            showCard(heading, body)
+            showCard(heading, text)
             return
           }
           const fire = () => {
             try {
-              new Notification(heading, { body, tag: `session-notify-${id}` })
+              new Notification(heading, { body: text, tag: `session-notify-${id}` })
             } catch {
-              showCard(heading, body)
+              showCard(heading, text)
             }
           }
           let permission = 'denied'
@@ -304,19 +314,19 @@ window.__ModuleLoader__.load({
             return
           }
           if (permission !== 'default') {
-            showCard(heading, body)
+            showCard(heading, text)
             return
           }
           try {
             const request = Notification.requestPermission()
             const settle = (result) => {
               if (result === 'granted') fire()
-              else showCard(heading, body)
+              else showCard(heading, text)
             }
-            if (request && typeof request.then === 'function') request.then(settle, () => showCard(heading, body))
+            if (request && typeof request.then === 'function') request.then(settle, () => showCard(heading, text))
             else Notification.requestPermission(settle)
           } catch {
-            showCard(heading, body)
+            showCard(heading, text)
           }
         }
 
@@ -443,9 +453,58 @@ window.__ModuleLoader__.load({
             if (disposed) return
             const current = tracked.get(id)
             if (!current || current.running) return
-            showCardFor(id, current)
+            showCardFor(id, current, bodyTextOf(current))
           }, cfg.idleDelayMs)
           pendingIdle.set(id, timer)
+        }))
+
+        /** Fallback state when a push arrives for a session we do not track. */
+        const stateForNotify = (id) => {
+          return tracked.get(id) || {
+            ref: null,
+            unsub: null,
+            lastReason: null,
+            running: true,
+            title: safeCall(() => {
+              const summary = ctx.sessions.list.getSnapshot()?.byId?.[id]
+              return typeof summary?.title === 'string' ? boundText(summary.title, 120) : ''
+            }) || ''
+          }
+        }
+
+        // Mid-run interaction pushes: tool approval requests and user
+        // questions arrive on session-scoped remote channels while the
+        // agent is still running, so they bypass the idle timer.
+        const seenInteractions = new Set()
+        const onceInteraction = (key) => {
+          if (seenInteractions.has(key)) return false
+          if (seenInteractions.size >= 200) seenInteractions.clear()
+          seenInteractions.add(key)
+          return true
+        }
+        const notifyInteraction = (id, body) => {
+          if (disposed) return
+          showCardFor(id, stateForNotify(id), body)
+        }
+        const disposeApproval = safeCall(() => ctx.remote.$on('approval/request', function (request) {
+          const id = safeCall(() => ctx.sessions.scopeOf?.(this))
+          if (typeof id !== 'string' || !id || disposed) return
+          const tool = boundText(request?.toolName ?? '', 60)
+          if (!onceInteraction(`approval:${request?.callId ?? tool}`)) return
+          notifyInteraction(id, tool ? `${texts.approval}：${tool}` : texts.approval)
+        }))
+        const disposeQuestions = safeCall(() => ctx.remote.$on('user-questions/request', function (request) {
+          const id = safeCall(() => ctx.sessions.scopeOf?.(this))
+          if (typeof id !== 'string' || !id || disposed) return
+          const questions = Array.isArray(request?.questions) ? request.questions : []
+          if (!questions.length) return
+          const first = questions[0] ?? {}
+          if (!onceInteraction(`questions:${first.id ?? first.key ?? boundText(first.question, 60)}`)) return
+          const lead = boundText(first.question ?? first.header ?? '', 60)
+          const body = questions.length > 1 || !lead
+            ? texts.questionMany(questions.length)
+            : `${texts.question}：${lead}`
+          notifyInteraction(id, body)
         }))
 
         const disposeList = safeCall(() => ctx.sessions.list.subscribe(() => {
@@ -465,7 +524,10 @@ window.__ModuleLoader__.load({
           for (const id of [...tracked.keys()]) releaseSession(id)
           for (const timer of pendingIdle.values()) clearTimeout(timer)
           pendingIdle.clear()
+          seenInteractions.clear()
           safeCall(disposeStatus)
+          safeCall(disposeApproval)
+          safeCall(disposeQuestions)
           safeCall(disposeList)
           safeCall(disposeReset)
           container?.remove()
