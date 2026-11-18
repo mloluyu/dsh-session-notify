@@ -486,25 +486,39 @@ window.__ModuleLoader__.load({
           if (disposed) return
           showCardFor(id, stateForNotify(id), body)
         }
-        const disposeApproval = safeCall(() => ctx.remote.$on('approval/request', function (request) {
-          const id = safeCall(() => ctx.sessions.scopeOf?.(this))
-          if (typeof id !== 'string' || !id || disposed) return
-          const tool = boundText(request?.toolName ?? '', 60)
-          if (!onceInteraction(`approval:${request?.callId ?? tool}`)) return
-          notifyInteraction(id, tool ? `${texts.approval}：${tool}` : texts.approval)
+        // `approval/request` and `user-questions/request` are forwarded as
+        // Cordis *waterfalls*, so every listener sits in an answer chain and
+        // must pass control on with next(). Returning without calling next()
+        // vetoes the chain and hands the Host an undefined answer.
+        const nextOf = (next) => (typeof next === 'function' ? next() : undefined)
+        const disposeApproval = safeCall(() => ctx.remote.$on('approval/request', function (request, next) {
+          try {
+            const id = safeCall(() => ctx.sessions.scopeOf?.(this))
+            if (typeof id === 'string' && id && !disposed) {
+              const tool = boundText(request?.toolName ?? '', 60)
+              if (onceInteraction(`approval:${request?.callId ?? tool}`)) {
+                notifyInteraction(id, tool ? `${texts.approval}：${tool}` : texts.approval)
+              }
+            }
+          } catch {}
+          return nextOf(next)
         }))
-        const disposeQuestions = safeCall(() => ctx.remote.$on('user-questions/request', function (request) {
-          const id = safeCall(() => ctx.sessions.scopeOf?.(this))
-          if (typeof id !== 'string' || !id || disposed) return
-          const questions = Array.isArray(request?.questions) ? request.questions : []
-          if (!questions.length) return
-          const first = questions[0] ?? {}
-          if (!onceInteraction(`questions:${first.id ?? first.key ?? boundText(first.question, 60)}`)) return
-          const lead = boundText(first.question ?? first.header ?? '', 60)
-          const body = questions.length > 1 || !lead
-            ? texts.questionMany(questions.length)
-            : `${texts.question}：${lead}`
-          notifyInteraction(id, body)
+        const disposeQuestions = safeCall(() => ctx.remote.$on('user-questions/request', function (request, next) {
+          try {
+            const id = safeCall(() => ctx.sessions.scopeOf?.(this))
+            if (typeof id === 'string' && id && !disposed) {
+              const questions = Array.isArray(request?.questions) ? request.questions : []
+              const first = questions[0] ?? {}
+              if (questions.length && onceInteraction(`questions:${first.id ?? first.key ?? boundText(first.question, 60)}`)) {
+                const lead = boundText(first.question ?? first.header ?? '', 60)
+                const body = questions.length > 1 || !lead
+                  ? texts.questionMany(questions.length)
+                  : `${texts.question}：${lead}`
+                notifyInteraction(id, body)
+              }
+            }
+          } catch {}
+          return nextOf(next)
         }))
 
         const disposeList = safeCall(() => ctx.sessions.list.subscribe(() => {
