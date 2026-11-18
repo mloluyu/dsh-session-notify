@@ -310,7 +310,7 @@ window.__ModuleLoader__.load({
           return texts.other
         }
 
-        const showCardFor = (id, state, body) => {
+        const showCardFor = (id, state, body, { force = false } = {}) => {
           if (disposed) return
           let focused = true
           try {
@@ -320,8 +320,11 @@ window.__ModuleLoader__.load({
             postWebNotification(id, state, body)
             return
           }
-          // The user is watching this session live: no popup needed.
-          if (viewedSessionId === id) return
+          // Turn-end updates need no popup when the user is watching this
+          // session live. Blocking interaction requests (approval / user
+          // questions) pass `force`: the prompt sits in the chat flow where
+          // it is easy to miss, so it surfaces even on the viewed session.
+          if (!force && viewedSessionId === id) return
           if (!cfg.cardEnabled) return
           showCard(state.title || cfg.title, body)
         }
@@ -340,6 +343,7 @@ window.__ModuleLoader__.load({
           }
           const fire = () => {
             try {
+              console.info('[session-notify] posting system notification:', heading)
               new Notification(heading, { body: text, tag: `session-notify-${id}` })
             } catch {
               showCard(heading, text)
@@ -348,6 +352,9 @@ window.__ModuleLoader__.load({
           let permission = 'denied'
           try {
             permission = Notification.permission
+          } catch {}
+          try {
+            console.info('[session-notify] notification channel permission:', permission)
           } catch {}
           if (permission === 'granted') {
             fire()
@@ -524,7 +531,10 @@ window.__ModuleLoader__.load({
         }
         const notifyInteraction = (id, body) => {
           if (disposed) return
-          showCardFor(id, stateForNotify(id), body)
+          try {
+            console.info('[session-notify] interaction notification:', body)
+          } catch {}
+          showCardFor(id, stateForNotify(id), body, { force: true })
         }
         // `approval/request` and `user-questions/request` are forwarded as
         // Cordis *waterfalls*, so every listener sits in an answer chain and
