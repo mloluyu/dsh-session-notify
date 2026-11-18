@@ -41,4 +41,4 @@
 - 运行中的授权/提问用三条冗余通道检测：会话流里的 `tool/call`（`ask_user_question`）、会话运行期间轮询 `remote.session.state` 的 `pendingInput`、以及 `approval/request`/`user-questions/request` 转发推送；三通道共享去重键，同一请求只提醒一次。（v0.2.2-rc.3 的客户端网关接受转发推送的订阅但不派发；实际由流与轮询两条通道承载。若后续版本修复派发，现有 handler 会自动生效。）
 - `index.js`（宿主侧）：刻意的 no-op，只为了让 bundle 注册为 host 插件、GUI 才会加载 client 半边。
 
-无配置项——所有行为由 client.js 顶部的 `DEFAULTS` 常量决定（卡片开关/时长/堆叠上限/宽限时长/回退标题），需要调整直接改源码。bundle 零外部依赖、零子进程。
+无配置项——所有行为由 client.js 顶部的 `DEFAULTS` 常量决定（卡片开关/时长/堆叠上限/宽限时长/回退标题），需要调整直接改源码。bundle 零外部依赖、零子进程。基于 DSH v0.2.2-rc.3 构建；插件依赖的八个客户端侧包在 v0.2.2-rc.5 中逐字节相同（已做全量 diff 验证），升级对本插件无影响。
