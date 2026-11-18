@@ -1,0 +1,4 @@
+- insert:
+    - id: session-notify
+      name: '@local/session-notify'
+      config: {}

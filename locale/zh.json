@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "会话完成通知",
+    "description": "会话完成任务、出错、被取消或等待你的输入时，发送 macOS 系统通知。subagent 会话不在通知范围内。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}

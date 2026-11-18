@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Session completion notifications",
+    "description": "Sends a macOS system notification when a session finishes its work, fails, gets cancelled, or waits for your input. Subagent sessions are excluded.",
+    "detail": "docs/DETAIL.md"
+  }
+}
