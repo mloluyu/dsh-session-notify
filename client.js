@@ -203,6 +203,7 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         const cfg = readConfig()
         const texts = isChineseLocale(ctx) ? TEXTS.zh : TEXTS.en
+        console.info('[session-notify] client live — build 2210 (stream+poll+forwarded channels)')
 
         // Startup self-check. The plugin sits on undocumented client-side
         // surfaces (sessions / remote / uiSession); after a DSH upgrade they
@@ -241,8 +242,14 @@ window.__ModuleLoader__.load({
         // polling needs the remote.session.state sub-service. If a future
         // DSH drops it, questions/approvals via the forwarded channel (and
         // questions via the session stream) still work — only the polling
-        // fallback goes away.
-        let pollAvailable = typeof ctx.remote?.session?.state === 'function'
+        // fallback goes away. The access itself can throw (cordis guards
+        // property access), so guard it too.
+        let pollAvailable = false
+        try {
+          pollAvailable = typeof ctx.remote?.session?.state === 'function'
+        } catch (error) {
+          console.error('[session-notify] approval polling unavailable (remote.session access denied):', String(error?.message ?? error))
+        }
         if (!pollAvailable) {
           console.error('[session-notify] approval polling unavailable (ctx.remote.session.state missing) — approval notices limited to the forwarded channel')
         }
