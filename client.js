@@ -42,6 +42,7 @@ window.__ModuleLoader__.load({
         approval: '等待你的授权',
         question: '等待你的回答',
         questionMany: (count) => `等待你的回答（${count} 个问题）`,
+        compatBody: '会话通知插件已停用：新版 DSH 的页面接口缺失',
         dismiss: '关闭'
       },
       en: {
@@ -54,6 +55,7 @@ window.__ModuleLoader__.load({
         approval: 'Approval needed',
         question: 'Answer needed',
         questionMany: (count) => `Answer needed (${count} questions)`,
+        compatBody: 'Session notifications are disabled — this DSH version is missing client APIs',
         dismiss: 'Dismiss'
       }
     }
@@ -169,6 +171,44 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         const cfg = readConfig()
         const texts = isChineseLocale(ctx) ? TEXTS.zh : TEXTS.en
+
+        // Startup self-check. The plugin sits on undocumented client-side
+        // surfaces (sessions / remote / uiSession); after a DSH upgrade they
+        // may be renamed or removed, and the plugin would then fail *silently*
+        // — no cards, no notifications, nothing in the console. Verify up
+        // front and say so loudly instead. Returns from apply when broken:
+        // nothing below touches the services it just failed to find.
+        const missing = []
+        try {
+          const sessions = ctx.sessions ?? {}
+          if (typeof sessions.retain !== 'function' && typeof sessions.binding !== 'function') missing.push('ctx.sessions.retain/binding')
+          if (typeof sessions.list?.subscribe !== 'function') missing.push('ctx.sessions.list.subscribe')
+          if (typeof sessions.scopeOf !== 'function') missing.push('ctx.sessions.scopeOf')
+          if (typeof ctx.remote?.$on !== 'function') missing.push('ctx.remote.$on')
+          if (!ctx.uiSession?.adapter?.current) missing.push('ctx.uiSession.adapter.current')
+        } catch (error) {
+          missing.push(String(error?.message ?? error))
+        }
+        if (missing.length) {
+          const detail = missing.join(', ')
+          console.error('[session-notify] client APIs missing after DSH upgrade — plugin inactive:', detail)
+          try {
+            if (typeof document !== 'undefined' && document.body) {
+              const notice = document.createElement('div')
+              notice.textContent = `${texts.compatBody}：${detail}`
+              notice.style.cssText = [
+                'position:fixed', 'top:16px', 'right:16px', 'z-index:2147483000', 'max-width:340px',
+                'background:#ffffff', 'color:#1f2328', 'font:13px/1.5 -apple-system,system-ui,sans-serif',
+                'padding:12px 14px', 'border-radius:10px', 'box-shadow:0 6px 24px rgba(0,0,0,0.18)'
+              ].join(';')
+              notice.title = detail
+              notice.addEventListener('click', () => notice.remove())
+              document.body.append(notice)
+              setTimeout(() => notice.remove(), 30000)
+            }
+          } catch {}
+          return () => {}
+        }
 
         /** Tracked running sessions: id -> { ref, unsub, lastReason, title, running }. */
         const tracked = new Map()

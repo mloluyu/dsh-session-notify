@@ -41,7 +41,11 @@ First unfocused notification asks for notification permission once (Allow it). �
 
 Built against DSH **v0.2.2-rc.3** (desktop profile, macOS). Windows/Linux desktop builds should work identically since everything runs in the page; not verified.
 
+The plugin sits on undocumented client-side surfaces (`sessions` / `remote` / `uiSession`), so a future DSH release can break it silently. It therefore self-checks at startup: if any of those APIs are missing, it logs the exact list with `[session-notify]` to the console, shows a one-time card, and stays inactive instead of failing quietly.
+
 基于 DSH v0.2.2-rc.3（desktop profile，macOS）构建。一切逻辑跑在页面里，Windows/Linux 桌面版理论上通用，未实测。
+
+插件依赖若干未公开的页面侧接口（`sessions` / `remote` / `uiSession`），DSH 升级后可能静默失效。因此启动时会自检：缺哪个接口就在控制台以 `[session-notify]` 前缀列出清单、弹一张一次性卡片，并保持停用，而不是无声地失灵。
 
 ## License
 
