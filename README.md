@@ -33,7 +33,8 @@ First unfocused notification asks for notification permission once (Allow it). �
 
 ## How it works 实现
 
-- `client.js` — the whole plugin: tracks session running state via `api-session/status` pushes, reads the session's event stream (`sessions.retain`), watches the currently viewed session (`uiSession.adapter.current`), listens for mid-run approval/question pushes (`approval/request` / `user-questions/request`), renders plain-DOM cards, and raises notifications through the browser `Notification` API.
+- `client.js` — the whole plugin: tracks session running state via `api-session/status` pushes, reads the session's event stream (`sessions.retain`), watches the currently viewed session (`uiSession.adapter.current`), renders plain-DOM cards, and raises notifications through the browser `Notification` API.
+- Mid-run approvals/questions are detected through redundant channels: the session stream (`tool/call` of `ask_user_question`), polling `remote.session.state` `pendingInput` while a session runs, and the `approval/request` / `user-questions/request` forwarded pushes — shared dedup keys keep it to one notice per request. (In v0.2.2-rc.3 the forwarded pushes are accepted but never dispatched by the client gateway; the stream and polling channels carry the load. If a future release fixes dispatch, the same handlers light up automatically.)
 - `index.js` — a deliberate no-op; it exists only so the bundle registers as a host plugin, which is what makes the GUI load the client half.
 - `docs/DETAIL.md` / `docs/DETAIL.zh.md` — full documentation 完整文档.
 

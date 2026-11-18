@@ -13,9 +13,16 @@
  *     page unfocused -> a page-raised system notification (browser
  *     Notification API; the desktop app delivers it under its own
  *     identity: whale icon, one Settings entry).
- * - a tool approval request or a user question arrives mid-run
- *   (`approval/request` / `user-questions/request` remote pushes): same
- *   routing, but immediately.
+ * - a user question arrives mid-run: detected from the session event
+ *   stream (`tool/call` of `ask_user_question`, the same source the
+ *   official projection reads) and cleared on the matching `tool/result`.
+ * - a tool approval request arrives mid-run: detected by polling the
+ *   `session/state` remote API (`pendingInput`) while the session runs.
+ * - the `approval/request` / `user-questions/request` forwarded remote
+ *   waterfalls are also subscribed (opportunistic: they are the official
+ *   push channel, but on DSH v0.2.2-rc.3 they never dispatch to page
+ *   listeners). All three channels share dedup keys, so whichever fires
+ *   first wins and none double-notify.
  * When no page is open nothing is sent — by design.
  */
 window.__ModuleLoader__.load({
@@ -30,6 +37,8 @@ window.__ModuleLoader__.load({
     }
 
     const ERROR_MESSAGE_MAX_CHARS = 120
+    /** How often running sessions are polled for pending approvals. */
+    const POLL_INTERVAL_MS = 1200
 
     const TEXTS = {
       zh: {
@@ -166,8 +175,31 @@ window.__ModuleLoader__.load({
       return codes.some((code) => String(code).toLowerCase().startsWith('zh'))
     }
 
+    /**
+     * Read the question batch out of logged `ask_user_question` arguments
+     * (mirror of the official projection reader: the arguments arrive on the
+     * `tool/call` event as a raw JSON string).
+     */
+    function questionsOf(argumentsText) {
+      if (typeof argumentsText !== 'string') return null
+      let parsed
+      try {
+        parsed = JSON.parse(argumentsText)
+      } catch {
+        return null
+      }
+      const questions = parsed?.questions
+      if (!Array.isArray(questions) || !questions.length) return null
+      return questions
+    }
+
     return {
-      inject: ['sessions', 'remote', 'uiSession'],
+      // 'remote.session' is a *sub-service* of the remote gateway: cordis
+      // guards property access per key, so declaring 'remote' alone grants
+      // ctx.remote but NOT ctx.remote.session ("cannot get property
+      // 'remote.session' without inject"). Matches the official liveshare
+      // client's declaration.
+      inject: ['sessions', 'remote', 'uiSession', 'remote.session'],
       apply(ctx) {
         const cfg = readConfig()
         const texts = isChineseLocale(ctx) ? TEXTS.zh : TEXTS.en
@@ -186,8 +218,33 @@ window.__ModuleLoader__.load({
           if (typeof sessions.scopeOf !== 'function') missing.push('ctx.sessions.scopeOf')
           if (typeof ctx.remote?.$on !== 'function') missing.push('ctx.remote.$on')
           if (!ctx.uiSession?.adapter?.current) missing.push('ctx.uiSession.adapter.current')
+          // Live subscription probes: a $on call can also *throw* for specific
+          // events, which would otherwise be swallowed by the safeCall
+          // wrappers below.
+          const probe = (event) => {
+            try {
+              const dispose = ctx.remote.$on(event, function (request, next) {
+                return typeof next === 'function' ? next() : undefined
+              })
+              try { if (typeof dispose === 'function') dispose() } catch {}
+            } catch (error) {
+              missing.push(`$on(${event}) threw: ${String(error?.message ?? error)}`)
+            }
+          }
+          probe('api-session/status')
+          probe('approval/request')
+          probe('user-questions/request')
         } catch (error) {
           missing.push(String(error?.message ?? error))
+        }
+        // Optional capability, degrade instead of deactivate: approval
+        // polling needs the remote.session.state sub-service. If a future
+        // DSH drops it, questions/approvals via the forwarded channel (and
+        // questions via the session stream) still work — only the polling
+        // fallback goes away.
+        let pollAvailable = typeof ctx.remote?.session?.state === 'function'
+        if (!pollAvailable) {
+          console.error('[session-notify] approval polling unavailable (ctx.remote.session.state missing) — approval notices limited to the forwarded channel')
         }
         if (missing.length) {
           const detail = missing.join(', ')
@@ -204,7 +261,6 @@ window.__ModuleLoader__.load({
               notice.title = detail
               notice.addEventListener('click', () => notice.remove())
               document.body.append(notice)
-              setTimeout(() => notice.remove(), 30000)
             }
           } catch {}
           return () => {}
@@ -214,6 +270,10 @@ window.__ModuleLoader__.load({
         const tracked = new Map()
         /** Pending card timers by session id. */
         const pendingIdle = new Map()
+        /** Open `ask_user_question` calls per session: id -> Set(callId). */
+        const pendingQuestions = new Map()
+        /** Last sampled pendingInput kinds per session: id -> Set('approval'|'question'). */
+        const knownPending = new Map()
         let container = null
         let disposed = false
 
@@ -263,10 +323,10 @@ window.__ModuleLoader__.load({
           return container
         }
 
-        const showCard = (heading, body) => {
+        const showCard = (heading, body, { persist = false } = {}) => {
           const host = ensureContainer()
           if (!host) return
-          while (host.children.length >= cfg.cardMaxCount) host.firstElementChild?.remove()
+          while (host.children.length >= Math.max(cfg.cardMaxCount, 6)) host.firstElementChild?.remove()
           const card = document.createElement('div')
           card.className = 'dsh-sn-card'
           const titleEl = document.createElement('div')
@@ -294,7 +354,7 @@ window.__ModuleLoader__.load({
           card.addEventListener('click', dismiss)
           host.append(card)
           requestAnimationFrame(() => card.classList.add('dsh-sn-show'))
-          if (cfg.cardDurationMs > 0) auto = setTimeout(dismiss, cfg.cardDurationMs)
+          if (!persist && cfg.cardDurationMs > 0) auto = setTimeout(dismiss, cfg.cardDurationMs)
         }
 
         const bodyTextOf = (state) => {
@@ -343,7 +403,6 @@ window.__ModuleLoader__.load({
           }
           const fire = () => {
             try {
-              console.info('[session-notify] posting system notification:', heading)
               new Notification(heading, { body: text, tag: `session-notify-${id}` })
             } catch {
               showCard(heading, text)
@@ -352,9 +411,6 @@ window.__ModuleLoader__.load({
           let permission = 'denied'
           try {
             permission = Notification.permission
-          } catch {}
-          try {
-            console.info('[session-notify] notification channel permission:', permission)
           } catch {}
           if (permission === 'granted') {
             fire()
@@ -377,7 +433,15 @@ window.__ModuleLoader__.load({
           }
         }
 
-        const handleEvent = (state, event) => {
+        /** Compose the card body for a batch of questions. */
+        const questionBodyOf = (questions) => {
+          const first = questions[0] ?? {}
+          const lead = boundText(first.question ?? '', 60)
+          if (questions.length > 1) return lead ? `${texts.questionMany(questions.length)}：${lead}` : texts.questionMany(questions.length)
+          return lead ? `${texts.question}：${lead}` : texts.question
+        }
+
+        const handleEvent = (id, state, event) => {
           if (!event || typeof event.type !== 'string') return
           if (event.type === 'turn/end') {
             state.lastReason = event.data?.reason ?? null
@@ -386,6 +450,38 @@ window.__ModuleLoader__.load({
           if (event.type === 'session/title') {
             const value = event.data?.title ?? event.data
             if (typeof value === 'string' && value.trim()) state.title = boundText(value, 120)
+            return
+          }
+          if (event.type === 'tool/call') {
+            // The official projection reconstructs questions from exactly
+            // this event; the call is logged before the question blocks, so
+            // this is the earliest client-visible signal.
+            if (event.data?.name !== 'ask_user_question') return
+            const questions = questionsOf(event.data.arguments)
+            if (!questions) return
+            let open = pendingQuestions.get(id)
+            if (!open) {
+              open = new Set()
+              pendingQuestions.set(id, open)
+            }
+            const wasEmpty = open.size === 0
+            open.add(String(event.data.callId ?? ''))
+            // Notify once per open batch; the key is released on settle so
+            // the next batch notifies again.
+            if (wasEmpty) notifyInteraction(id, questionBodyOf(questions), `question:${id}`)
+            return
+          }
+          if (event.type === 'tool/result') {
+            const callId = String(event.data?.message?.toolCallId ?? '')
+            if (!callId) return
+            for (const [key, open] of pendingQuestions) {
+              if (!open.has(callId)) continue
+              open.delete(callId)
+              if (!open.size) {
+                pendingQuestions.delete(key)
+                seenInteractions.delete(`question:${key}`)
+              }
+            }
           }
         }
 
@@ -397,7 +493,7 @@ window.__ModuleLoader__.load({
             const snapshot = source.getSnapshot?.() ?? {}
             const change = snapshot.change
             if (change && change.kind === 'append' && Array.isArray(change.entries)) {
-              for (const entry of change.entries) handleEvent(state, entry?.event)
+              for (const entry of change.entries) handleEvent(id, state, entry?.event)
             }
           } catch {}
           try {
@@ -405,7 +501,7 @@ window.__ModuleLoader__.load({
               try {
                 const { change } = source.getSnapshot() ?? {}
                 if (!change || change.kind !== 'append' || !Array.isArray(change.entries)) return
-                for (const entry of change.entries) handleEvent(state, entry?.event)
+                for (const entry of change.entries) handleEvent(id, state, entry?.event)
               } catch {}
             })
           } catch {}
@@ -443,6 +539,8 @@ window.__ModuleLoader__.load({
             clearTimeout(timer)
             pendingIdle.delete(id)
           }
+          pendingQuestions.delete(id)
+          knownPending.delete(id)
           safeCall(state.unsub)
           try {
             state.ref?.release?.()
@@ -519,9 +617,11 @@ window.__ModuleLoader__.load({
           }
         }
 
-        // Mid-run interaction pushes: tool approval requests and user
-        // questions arrive on session-scoped remote channels while the
-        // agent is still running, so they bypass the idle timer.
+        // Mid-run interaction notifications: tool approval requests and user
+        // questions arrive while the agent is still running, so they bypass
+        // the idle timer and surface immediately (even on the viewed
+        // session). All detection channels funnel through here with shared
+        // dedup keys, so exactly one card is shown per pending request.
         const seenInteractions = new Set()
         const onceInteraction = (key) => {
           if (seenInteractions.has(key)) return false
@@ -529,26 +629,70 @@ window.__ModuleLoader__.load({
           seenInteractions.add(key)
           return true
         }
-        const notifyInteraction = (id, body) => {
+        const notifyInteraction = (id, body, key) => {
           if (disposed) return
-          try {
-            console.info('[session-notify] interaction notification:', body)
-          } catch {}
+          if (key !== undefined && !onceInteraction(key)) return
           showCardFor(id, stateForNotify(id), body, { force: true })
         }
-        // `approval/request` and `user-questions/request` are forwarded as
-        // Cordis *waterfalls*, so every listener sits in an answer chain and
-        // must pass control on with next(). Returning without calling next()
-        // vetoes the chain and hands the Host an undefined answer.
+
+        // Approval polling: the host samples pending forwarded requests into
+        // `session/state` (`pendingInput`), which is the only client-visible
+        // signal for tool approvals on this DSH build. Poll running sessions
+        // only; a kind that disappears releases its dedup key so a later
+        // request notifies again.
+        let pollBusy = false
+        const pollTick = async () => {
+          if (disposed || pollBusy) return
+          pollBusy = true
+          try {
+            for (const [id, state] of tracked) {
+              if (disposed || !state.running) continue
+              let value = null
+              try {
+                const result = await ctx.remote.session.state({ sessionId: id })
+                if (result && result.ok) value = result.value
+              } catch {}
+              if (!value) continue
+              if (value.running !== true) {
+                knownPending.delete(id)
+                continue
+              }
+              const kinds = Array.isArray(value.pendingInput)
+                ? value.pendingInput.filter((kind) => kind === 'approval' || kind === 'question')
+                : []
+              const known = knownPending.get(id) ?? new Set()
+              for (const kind of kinds) {
+                if (!known.has(kind)) notifyInteraction(id, kind === 'approval' ? texts.approval : texts.question, `${kind}:${id}`)
+              }
+              for (const kind of [...known]) {
+                if (!kinds.includes(kind)) seenInteractions.delete(`${kind}:${id}`)
+              }
+              knownPending.set(id, new Set(kinds))
+            }
+          } finally {
+            pollBusy = false
+          }
+        }
+        const pollTimer = pollAvailable
+          ? setInterval(() => {
+              safeCall(pollTick)
+            }, POLL_INTERVAL_MS)
+          : null
+
+        // Forwarded remote waterfalls: the official push channels for
+        // approvals and questions. Every listener sits in an answer chain and
+        // must pass control on with next() — returning without calling next()
+        // vetoes the chain and hands the Host an undefined answer. On the
+        // current DSH build these never dispatch to page listeners (detection
+        // above covers that), but they cost nothing and light up if a future
+        // build fixes the dispatch.
         const nextOf = (next) => (typeof next === 'function' ? next() : undefined)
         const disposeApproval = safeCall(() => ctx.remote.$on('approval/request', function (request, next) {
           try {
             const id = safeCall(() => ctx.sessions.scopeOf?.(this))
             if (typeof id === 'string' && id && !disposed) {
               const tool = boundText(request?.toolName ?? '', 60)
-              if (onceInteraction(`approval:${request?.callId ?? tool}`)) {
-                notifyInteraction(id, tool ? `${texts.approval}：${tool}` : texts.approval)
-              }
+              notifyInteraction(id, tool ? `${texts.approval}：${tool}` : texts.approval, `approval:${id}`)
             }
           } catch {}
           return nextOf(next)
@@ -558,14 +702,7 @@ window.__ModuleLoader__.load({
             const id = safeCall(() => ctx.sessions.scopeOf?.(this))
             if (typeof id === 'string' && id && !disposed) {
               const questions = Array.isArray(request?.questions) ? request.questions : []
-              const first = questions[0] ?? {}
-              if (questions.length && onceInteraction(`questions:${first.id ?? first.key ?? boundText(first.question, 60)}`)) {
-                const lead = boundText(first.question ?? first.header ?? '', 60)
-                const body = questions.length > 1 || !lead
-                  ? texts.questionMany(questions.length)
-                  : `${texts.question}：${lead}`
-                notifyInteraction(id, body)
-              }
+              if (questions.length) notifyInteraction(id, questionBodyOf(questions), `question:${id}`)
             }
           } catch {}
           return nextOf(next)
@@ -584,10 +721,13 @@ window.__ModuleLoader__.load({
 
         return () => {
           disposed = true
+          clearInterval(pollTimer)
           safeCall(disposeViewed)
           for (const id of [...tracked.keys()]) releaseSession(id)
           for (const timer of pendingIdle.values()) clearTimeout(timer)
           pendingIdle.clear()
+          pendingQuestions.clear()
+          knownPending.clear()
           seenInteractions.clear()
           safeCall(disposeStatus)
           safeCall(disposeApproval)

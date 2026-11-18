@@ -37,7 +37,8 @@
 
 ## 实现
 
-- `client.js`（页面内）：注入 `sessions`/`remote`/`uiSession` 服务；通过 `api-session/status` 推送跟踪会话 running 状态，用 `uiSession.adapter.current` 判断你正盯着哪个会话；运行中的授权/提问走 `approval/request`、`user-questions/request` 两个 remote 推送通道；卡片为纯 DOM，深浅色自适应；系统通知走 `Notification` API，首次触发会向浏览器/应用请求权限。
+- `client.js`（页面内）：注入 `sessions`/`remote`/`uiSession`/`remote.session` 服务（注意 `remote.session` 是 cordis 子服务，必须整串声明，只声明 `remote` 访问 `.session` 会报 "without inject"）；通过 `api-session/status` 推送跟踪会话 running 状态，用 `uiSession.adapter.current` 判断你正盯着哪个会话；卡片为纯 DOM，深浅色自适应；系统通知走 `Notification` API，首次触发会向浏览器/应用请求权限。
+- 运行中的授权/提问用三条冗余通道检测：会话流里的 `tool/call`（`ask_user_question`）、会话运行期间轮询 `remote.session.state` 的 `pendingInput`、以及 `approval/request`/`user-questions/request` 转发推送；三通道共享去重键，同一请求只提醒一次。（v0.2.2-rc.3 的客户端网关接受转发推送的订阅但不派发；实际由流与轮询两条通道承载。若后续版本修复派发，现有 handler 会自动生效。）
 - `index.js`（宿主侧）：刻意的 no-op，只为了让 bundle 注册为 host 插件、GUI 才会加载 client 半边。
 
 无配置项——所有行为由 client.js 顶部的 `DEFAULTS` 常量决定（卡片开关/时长/堆叠上限/宽限时长/回退标题），需要调整直接改源码。bundle 零外部依赖、零子进程。
