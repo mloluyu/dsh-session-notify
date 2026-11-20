@@ -1,7 +1,7 @@
 {
   "name": "@local/session-notify",
   "description": "Shows an in-app card or a page-raised system notification when a session finishes its work, fails, gets cancelled, or waits for your input.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "license": "MIT",
   "private": true,
   "type": "module",
