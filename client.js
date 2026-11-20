@@ -217,7 +217,7 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         const cfg = readConfig()
         const texts = isChineseLocale(ctx) ? TEXTS.zh : TEXTS.en
-        console.info('[session-notify] client live — build 2212 (stream+poll+forwarded+jump, interactions dual-channel)')
+        console.info('[session-notify] client live — build 2213 (stream+poll+forwarded+jump, dual-channel, retain recursion fixed)')
 
         // Startup self-check. The plugin sits on undocumented client-side
         // surfaces (sessions / remote / uiSession); after a DSH upgrade they
@@ -583,19 +583,25 @@ window.__ModuleLoader__.load({
 
         const trackSession = (id) => {
           if (tracked.has(id)) return
-          let ref = null
-          try {
-            ref = ctx.sessions.retain(id, { source: 'session-notify' })
-          } catch {
-            return
-          }
           const summaryTitle = safeCall(() => {
             const summary = ctx.sessions.list.getSnapshot()?.byId?.[id]
             return typeof summary?.title === 'string' ? boundText(summary.title, 120) : ''
           })
-          const state = { ref, unsub: null, lastReason: null, title: summaryTitle || '', running: true }
+          // Mark BEFORE retaining: retain() publishes retention synchronously
+          // to the list store we subscribe to, and that subscriber reconciles
+          // — the mark must already be visible when the nested reconcile runs
+          // or the two paths recurse until the stack overflows (seen live as
+          // "[client-store] subscriber failed: RangeError").
+          const state = { ref: null, unsub: null, lastReason: null, title: summaryTitle || '', running: true }
           tracked.set(id, state)
           try {
+            state.ref = ctx.sessions.retain(id, { source: 'session-notify' })
+          } catch {
+            tracked.delete(id)
+            return
+          }
+          try {
+            const ref = state.ref
             if (ref && typeof ref.ready?.then === 'function') {
               ref.ready.then((binding) => attachStream(id, state, binding), () => {})
             } else {
@@ -782,10 +788,22 @@ window.__ModuleLoader__.load({
           return nextOf(next)
         }))
 
-        const disposeList = safeCall(() => ctx.sessions.list.subscribe(() => {
-          if (!disposed) reconcileList()
-        }))
-        reconcileList()
+        // Retain/release publish retention synchronously into the very list
+        // store we subscribe to. Reconciling from inside that notification
+        // would re-enter retain/release and recurse to a stack overflow, so
+        // every reconcile pass is deferred and coalesced instead.
+        let reconcileQueued = false
+        const scheduleReconcile = () => {
+          if (reconcileQueued || disposed) return
+          reconcileQueued = true
+          setTimeout(() => {
+            reconcileQueued = false
+            if (!disposed) reconcileList()
+          }, 0)
+        }
+
+        const disposeList = safeCall(() => ctx.sessions.list.subscribe(scheduleReconcile))
+        scheduleReconcile()
 
         // A reconnect invalidates every open event stream; re-track lazily
         // on the next running transition.
