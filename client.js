@@ -23,6 +23,13 @@
  *   push channel, but on DSH v0.2.2-rc.3 they never dispatch to page
  *   listeners). All three channels share dedup keys, so whichever fires
  *   first wins and none double-notify.
+ * Clicking a card or the system notification jumps to the session the
+ * notice came from, via uiWorkspace.openSession() — the same call the
+ * official sidebar makes.
+ * Blocking interaction notifications (approval / user questions) go to
+ * BOTH channels — system notification plus (when focused) the in-app
+ * card — because their whole point is reaching a user who may step
+ * away mid-run. Turn-end keeps the quieter three-state routing.
  * When no page is open nothing is sent — by design.
  */
 window.__ModuleLoader__.load({
@@ -52,6 +59,7 @@ window.__ModuleLoader__.load({
         question: '等待你的回答',
         questionMany: (count) => `等待你的回答（${count} 个问题）`,
         compatBody: '会话通知插件已停用：新版 DSH 的页面接口缺失',
+        jumpHint: '点击跳转到该会话',
         dismiss: '关闭'
       },
       en: {
@@ -65,6 +73,7 @@ window.__ModuleLoader__.load({
         question: 'Answer needed',
         questionMany: (count) => `Answer needed (${count} questions)`,
         compatBody: 'Session notifications are disabled — this DSH version is missing client APIs',
+        jumpHint: 'Click to open this session',
         dismiss: 'Dismiss'
       }
     }
@@ -199,11 +208,16 @@ window.__ModuleLoader__.load({
       // ctx.remote but NOT ctx.remote.session ("cannot get property
       // 'remote.session' without inject"). Matches the official liveshare
       // client's declaration.
-      inject: ['sessions', 'remote', 'uiSession', 'remote.session'],
+      // 'uiWorkspace' is a *service-level* inject (permission declaration,
+      // not a boot dependency): the service is provided by the app shell's
+      // own client at the root scope, so no package.json dsh.client.inject
+      // entry is needed — and adding one MID-SESSION froze the page once
+      // (host manifest hot-reconcile), so it stays out deliberately.
+      inject: ['sessions', 'remote', 'uiSession', 'remote.session', 'uiWorkspace'],
       apply(ctx) {
         const cfg = readConfig()
         const texts = isChineseLocale(ctx) ? TEXTS.zh : TEXTS.en
-        console.info('[session-notify] client live — build 2210 (stream+poll+forwarded channels)')
+        console.info('[session-notify] client live — build 2212 (stream+poll+forwarded+jump, interactions dual-channel)')
 
         // Startup self-check. The plugin sits on undocumented client-side
         // surfaces (sessions / remote / uiSession); after a DSH upgrade they
@@ -252,6 +266,19 @@ window.__ModuleLoader__.load({
         }
         if (!pollAvailable) {
           console.error('[session-notify] approval polling unavailable (ctx.remote.session.state missing) — approval notices limited to the forwarded channel')
+        }
+        // Optional capability, degrade instead of deactivate: click-to-jump
+        // needs the uiWorkspace service (the same openSession() the official
+        // sidebar and subagent list call). Without it, cards and notification
+        // clicks only dismiss instead of navigating.
+        let jumpAvailable = false
+        try {
+          jumpAvailable = typeof ctx.uiWorkspace?.openSession === 'function'
+        } catch (error) {
+          console.error('[session-notify] click-to-jump unavailable (uiWorkspace access denied):', String(error?.message ?? error))
+        }
+        if (!jumpAvailable) {
+          console.error('[session-notify] click-to-jump unavailable (ctx.uiWorkspace.openSession missing)')
         }
         if (missing.length) {
           const detail = missing.join(', ')
@@ -311,6 +338,23 @@ window.__ModuleLoader__.load({
           return undefined
         }
 
+        // Click-to-jump: cards and system notifications navigate to the
+        // session they came from, via the same openSession() the official
+        // sidebar uses. System notifications keep a strong reference until
+        // onclose — an unreferenced Notification can be garbage-collected
+        // before the user clicks it, killing the onclick handler.
+        const activeNotifications = new Set()
+        const jump = (id) => {
+          if (!id) return
+          try {
+            if (typeof ctx.uiWorkspace?.openSession === 'function') ctx.uiWorkspace.openSession(id)
+            else console.error('[session-notify] jump unavailable (ctx.uiWorkspace.openSession missing)')
+          } catch (error) {
+            console.error('[session-notify] jump failed:', String(error?.message ?? error))
+          }
+          try { window.focus() } catch {}
+        }
+
         const ensureStyle = () => {
           if (document.getElementById(STYLE_ID)) return
           const style = document.createElement('style')
@@ -330,7 +374,7 @@ window.__ModuleLoader__.load({
           return container
         }
 
-        const showCard = (heading, body, { persist = false } = {}) => {
+        const showCard = (heading, body, { persist = false, sessionId = null } = {}) => {
           const host = ensureContainer()
           if (!host) return
           while (host.children.length >= Math.max(cfg.cardMaxCount, 6)) host.firstElementChild?.remove()
@@ -358,7 +402,17 @@ window.__ModuleLoader__.load({
             event.stopPropagation()
             dismiss()
           })
-          card.addEventListener('click', dismiss)
+          // Clicking the card jumps to the session the notice came from
+          // (the × button above stops propagation, so it only dismisses).
+          if (sessionId) {
+            card.title = texts.jumpHint
+            card.addEventListener('click', () => {
+              jump(sessionId)
+              dismiss()
+            })
+          } else {
+            card.addEventListener('click', dismiss)
+          }
           host.append(card)
           requestAnimationFrame(() => card.classList.add('dsh-sn-show'))
           if (!persist && cfg.cardDurationMs > 0) auto = setTimeout(dismiss, cfg.cardDurationMs)
@@ -377,7 +431,7 @@ window.__ModuleLoader__.load({
           return texts.other
         }
 
-        const showCardFor = (id, state, body, { force = false } = {}) => {
+        const showCardFor = (id, state, body, { force = false, alwaysSystem = false } = {}) => {
           if (disposed) return
           let focused = true
           try {
@@ -387,13 +441,19 @@ window.__ModuleLoader__.load({
             postWebNotification(id, state, body)
             return
           }
+          // Blocking interaction requests (approval / user questions) go to
+          // BOTH channels: the system notification must reach the user even
+          // when they are looking at the window, because the whole point is
+          // that they can step away mid-run. Turn-end keeps the quieter
+          // three-state routing.
+          if (alwaysSystem) postWebNotification(id, state, body)
           // Turn-end updates need no popup when the user is watching this
           // session live. Blocking interaction requests (approval / user
           // questions) pass `force`: the prompt sits in the chat flow where
           // it is easy to miss, so it surfaces even on the viewed session.
           if (!force && viewedSessionId === id) return
           if (!cfg.cardEnabled) return
-          showCard(state.title || cfg.title, body)
+          showCard(state.title || cfg.title, body, { sessionId: id })
         }
 
         /**
@@ -405,14 +465,21 @@ window.__ModuleLoader__.load({
           const heading = state.title || cfg.title
           const text = body || bodyTextOf(state)
           if (typeof Notification === 'undefined') {
-            showCard(heading, text)
+            showCard(heading, text, { sessionId: id })
             return
           }
           const fire = () => {
             try {
-              new Notification(heading, { body: text, tag: `session-notify-${id}` })
+              const notification = new Notification(heading, { body: text, tag: `session-notify-${id}` })
+              activeNotifications.add(notification)
+              // Clicking the OS notification jumps to the session. Electron
+              // routes the click into the renderer, but the window itself
+              // may still be hidden (macOS close-to-hide) — jump() calls
+              // window.focus() to surface it.
+              notification.onclick = () => jump(id)
+              notification.onclose = () => activeNotifications.delete(notification)
             } catch {
-              showCard(heading, text)
+              showCard(heading, text, { sessionId: id })
             }
           }
           let permission = 'denied'
@@ -424,19 +491,19 @@ window.__ModuleLoader__.load({
             return
           }
           if (permission !== 'default') {
-            showCard(heading, text)
+            showCard(heading, text, { sessionId: id })
             return
           }
           try {
             const request = Notification.requestPermission()
             const settle = (result) => {
               if (result === 'granted') fire()
-              else showCard(heading, text)
+              else showCard(heading, text, { sessionId: id })
             }
-            if (request && typeof request.then === 'function') request.then(settle, () => showCard(heading, text))
+            if (request && typeof request.then === 'function') request.then(settle, () => showCard(heading, text, { sessionId: id }))
             else Notification.requestPermission(settle)
           } catch {
-            showCard(heading, text)
+            showCard(heading, text, { sessionId: id })
           }
         }
 
@@ -639,7 +706,7 @@ window.__ModuleLoader__.load({
         const notifyInteraction = (id, body, key) => {
           if (disposed) return
           if (key !== undefined && !onceInteraction(key)) return
-          showCardFor(id, stateForNotify(id), body, { force: true })
+          showCardFor(id, stateForNotify(id), body, { force: true, alwaysSystem: true })
         }
 
         // Approval polling: the host samples pending forwarded requests into
@@ -736,6 +803,13 @@ window.__ModuleLoader__.load({
           pendingQuestions.clear()
           knownPending.clear()
           seenInteractions.clear()
+          for (const notification of activeNotifications) {
+            try {
+              notification.onclick = null
+              notification.close()
+            } catch {}
+          }
+          activeNotifications.clear()
           safeCall(disposeStatus)
           safeCall(disposeApproval)
           safeCall(disposeQuestions)
