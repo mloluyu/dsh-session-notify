@@ -90,7 +90,7 @@ window.__ModuleLoader__.load({
   flex-direction: column;
   gap: 10px;
   z-index: 2147483000;
-  width: min(600px, calc(100vw - 32px));
+  width: min(400px, calc(100vw - 32px));
   pointer-events: none;
 }
 .dsh-sn-card {
@@ -104,11 +104,11 @@ window.__ModuleLoader__.load({
   padding: 14px 36px 14px 16px;
   font: 13.5px/1.5 var(--dsw-font-sans, -apple-system, "Segoe UI", sans-serif);
   opacity: 0;
-  transform: translateY(-12px) scale(0.94);
-  transition: opacity 0.26s cubic-bezier(0.2, 0.9, 0.3, 1), transform 0.26s cubic-bezier(0.34, 1.3, 0.5, 1);
+  transform: translateX(32px);
+  transition: opacity 0.26s cubic-bezier(0.2, 0.9, 0.3, 1), transform 0.26s cubic-bezier(0.2, 0.9, 0.3, 1);
   cursor: pointer;
 }
-.dsh-sn-card.dsh-sn-show { opacity: 1; transform: translateY(0) scale(1); }
+.dsh-sn-card.dsh-sn-show { opacity: 1; transform: translateX(0); }
 .dsh-sn-title {
   font-size: 14px;
   font-weight: 650;
@@ -217,7 +217,7 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         const cfg = readConfig()
         const texts = isChineseLocale(ctx) ? TEXTS.zh : TEXTS.en
-        console.info('[session-notify] client live — build 2214 (stream+poll+forwarded+jump, dual-channel, banner cards)')
+        console.info('[session-notify] client live — build 2215 (stream+poll+forwarded+jump, dual-channel, 400px slide-in cards)')
 
         // Startup self-check. The plugin sits on undocumented client-side
         // surfaces (sessions / remote / uiSession); after a DSH upgrade they
