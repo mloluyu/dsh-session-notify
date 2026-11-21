@@ -88,9 +88,9 @@ window.__ModuleLoader__.load({
   top: 16px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   z-index: 2147483000;
-  max-width: 360px;
+  width: min(600px, calc(100vw - 32px));
   pointer-events: none;
 }
 .dsh-sn-card {
@@ -99,41 +99,41 @@ window.__ModuleLoader__.load({
   background: #ffffff;
   color: #1f2328;
   border: 1px solid rgba(127, 127, 127, 0.35);
-  border-radius: var(--dsw-radius-md, 10px);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
-  padding: 10px 30px 10px 14px;
-  font: 13px/1.45 var(--dsw-font-sans, -apple-system, "Segoe UI", sans-serif);
-  max-width: 360px;
+  border-radius: 14px;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.12);
+  padding: 14px 36px 14px 16px;
+  font: 13.5px/1.5 var(--dsw-font-sans, -apple-system, "Segoe UI", sans-serif);
   opacity: 0;
-  transform: translateX(24px) scale(0.96);
-  transition: opacity 0.22s cubic-bezier(0.2, 0.9, 0.3, 1), transform 0.22s cubic-bezier(0.2, 0.9, 0.3, 1);
+  transform: translateY(-12px) scale(0.94);
+  transition: opacity 0.26s cubic-bezier(0.2, 0.9, 0.3, 1), transform 0.26s cubic-bezier(0.34, 1.3, 0.5, 1);
   cursor: pointer;
 }
-.dsh-sn-card.dsh-sn-show { opacity: 1; transform: translateX(0) scale(1); }
+.dsh-sn-card.dsh-sn-show { opacity: 1; transform: translateY(0) scale(1); }
 .dsh-sn-title {
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 650;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .dsh-sn-body {
-  margin-top: 2px;
-  font-size: 12.5px;
+  margin-top: 4px;
+  font-size: 13px;
   color: #5a6069;
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
   word-break: break-word;
 }
 .dsh-sn-close {
   position: absolute;
-  top: 6px;
-  right: 8px;
+  top: 10px;
+  right: 12px;
   background: none;
   border: none;
   padding: 2px;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1;
   color: #8a8f98;
   cursor: pointer;
@@ -217,7 +217,7 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         const cfg = readConfig()
         const texts = isChineseLocale(ctx) ? TEXTS.zh : TEXTS.en
-        console.info('[session-notify] client live — build 2213 (stream+poll+forwarded+jump, dual-channel, retain recursion fixed)')
+        console.info('[session-notify] client live — build 2214 (stream+poll+forwarded+jump, dual-channel, banner cards)')
 
         // Startup self-check. The plugin sits on undocumented client-side
         // surfaces (sessions / remote / uiSession); after a DSH upgrade they
